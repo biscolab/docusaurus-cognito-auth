@@ -1,0 +1,20 @@
+version = 0.1
+
+[default]
+[default.global.parameters]
+stack_name = "docusaurus-cognito-auth"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+# Lambda@Edge MUST be deployed in us-east-1
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset = true
+resolve_s3 = true
+# Override these via --parameter-overrides or fill in before deploy
+parameter_overrides = [
+  "CognitoDomainPrefix=biscolab-docusaurus-auth",
+]

@@ -1,0 +1,7 @@
+{
+  "name": "auth-callback",
+  "version": "1.0.0",
+  "description": "Lambda@Edge viewer-request handler — Cognito OAuth callback",
+  "type": "module",
+  "dependencies": {}
+}

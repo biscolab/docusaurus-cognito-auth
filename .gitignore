@@ -1,0 +1,9 @@
+node_modules/
+.aws-sam/
+coverage/
+.env
+samconfig.toml.bak
+
+# Generated Lambda config files (created by scripts/build-config.mjs)
+src/auth-check/config.mjs
+src/auth-callback/config.mjs

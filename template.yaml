@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  docusaurus-cognito-auth — Serverless authentication layer (Lambda@Edge + Cognito)
+  that protects any static site hosted on S3 + CloudFront.
+  This stack provisions the auth infrastructure only. Deploy your static site
+  files separately to the SiteBucket output.
+
+Parameters:
+  CognitoUserPoolName:
+    Type: String
+    Default: docusaurus-auth-pool
+    Description: Name for the Cognito User Pool
+
+  CognitoDomainPrefix:
+    Type: String
+    Description: >
+      Unique prefix for the Cognito Hosted UI domain.
+      Must be globally unique across all AWS accounts.
+      Results in: <prefix>.auth.<region>.amazoncognito.com
+
+  # Fill this in after the first deploy (use the CloudFrontDomain output + /callback).
+  # On the first deploy, any placeholder is acceptable because the pool isn't live yet.
+  CallbackUrl:
+    Type: String
+    Description: >
+      Full callback URL including /callback path.
+      Example: https://XXXXXXXXXXXX.cloudfront.net/callback
+    Default: https://placeholder.example.com/callback
+
+  CloudFrontPriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+    Description: >
+      PriceClass_100 = US/Canada/Europe only (cheapest).
+      PriceClass_All = all edge locations.
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 5
+    MemorySize: 128
+    Architectures: [x86_64]
+
+Resources:
+  # ─────────────────────────────────────────────────────────────
+  # S3 — Logging bucket (receives access logs from SiteBucket)
+  # ─────────────────────────────────────────────────────────────
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # Grant the S3 server-access-logging service permission to write log objects.
+  LogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${LogsBucket.Arn}/site-access-logs/*'
+            Condition:
+              ArnLike:
+                aws:SourceArn: !GetAtt SiteBucket.Arn
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # ─────────────────────────────────────────────────────────────
+  # S3 — Private bucket for static site files
+  # ─────────────────────────────────────────────────────────────
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Suspended
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogsBucket
+        LogFilePrefix: site-access-logs/
+
+  # ─────────────────────────────────────────────────────────────
+  # CloudFront Origin Access Control (OAC)
+  # ─────────────────────────────────────────────────────────────
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # Allow CloudFront (via OAC) to read objects from the private S3 bucket.
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${SiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  # ─────────────────────────────────────────────────────────────
+  # Cognito User Pool + Hosted UI
+  # ─────────────────────────────────────────────────────────────
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Ref CognitoUserPoolName
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  # Public client — no client secret (appropriate for Lambda@Edge where secrets can't be stored securely).
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: docusaurus-auth-client
+      GenerateSecret: false
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - !Ref CallbackUrl
+      LogoutURLs:
+        - !Sub 'https://${CloudFrontDistribution.DomainName}'
+      SupportedIdentityProviders: [COGNITO]
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      # Token validity
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref CognitoUserPool
+
+  # ─────────────────────────────────────────────────────────────
+  # IAM Role for Lambda@Edge functions
+  # Both lambda.amazonaws.com and edgelambda.amazonaws.com must be trusted.
+  # ─────────────────────────────────────────────────────────────
+  LambdaEdgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-lambda-edge-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - edgelambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # ─────────────────────────────────────────────────────────────
+  # Lambda@Edge: auth-check (viewer-request on every path)
+  # Validates the auth_token cookie; redirects to Cognito if missing/invalid.
+  # ─────────────────────────────────────────────────────────────
+  AuthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/auth-check/
+      Handler: index.handler
+      Description: Validates JWT on every CloudFront viewer-request
+      Role: !GetAtt LambdaEdgeRole.Arn
+      # AutoPublishAlias publishes a new numeric version on every code/config change.
+      # Use !Ref AuthCheckFunction.Version (version ARN) in CloudFront — NOT the alias ARN.
+      AutoPublishAlias: live
+
+  # ─────────────────────────────────────────────────────────────
+  # Lambda@Edge: auth-callback (viewer-request on /callback only)
+  # Exchanges Cognito auth code for tokens; sets the auth_token cookie.
+  # ─────────────────────────────────────────────────────────────
+  AuthCallbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/auth-callback/
+      Handler: index.handler
+      Description: Handles Cognito OAuth callback and sets auth_token cookie
+      Role: !GetAtt LambdaEdgeRole.Arn
+      AutoPublishAlias: live
+
+  # ─────────────────────────────────────────────────────────────
+  # CloudFront Distribution
+  # ─────────────────────────────────────────────────────────────
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: !Ref CloudFrontPriceClass
+        HttpVersion: http2and3
+        Comment: !Sub '${AWS::StackName} — static site with Cognito auth'
+
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            # OAC — leave S3OriginConfig empty (no OAI).
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+
+        # Default behaviour: every request goes through auth-check.
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          # CachingOptimized (AWS managed policy)
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          Compress: true
+          LambdaFunctionAssociations:
+            - EventType: viewer-request
+              LambdaFunctionARN: !Ref AuthCheckFunction.Version
+              IncludeBody: false
+
+        # /callback is intercepted by auth-callback before reaching S3.
+        CacheBehaviors:
+          - PathPattern: /callback
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            # CachingDisabled (AWS managed policy)
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            # Forward query strings (code, state) to the Lambda.
+            OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf
+            AllowedMethods: [GET, HEAD]
+            LambdaFunctionAssociations:
+              - EventType: viewer-request
+                LambdaFunctionARN: !Ref AuthCallbackFunction.Version
+                IncludeBody: false
+
+        # SPA-style error handling: serve index.html for 403/404 so client-side
+        # routing works after the user is authenticated.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+
+Outputs:
+  CloudFrontDomain:
+    Description: >
+      CloudFront distribution domain. Use this to update CALLBACK_URL in your .env
+      (https://<domain>/callback) and then redeploy.
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontDomain'
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (useful for cache invalidations)
+    Value: !Ref CloudFrontDistribution
+
+  SiteBucketName:
+    Description: >
+      S3 bucket name for static site files. Upload your Docusaurus (or any static)
+      build output here: aws s3 sync ./build s3://<bucket-name> --delete
+    Value: !Ref SiteBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-SiteBucket'
+
+  CognitoLoginUrl:
+    Description: Direct link to the Cognito Hosted UI login page
+    Value: !Sub
+      - 'https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${ClientId}&redirect_uri=${CallbackUrl}&response_type=code&scope=openid+email+profile'
+      - ClientId: !Ref CognitoUserPoolClient
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref CognitoUserPoolClient

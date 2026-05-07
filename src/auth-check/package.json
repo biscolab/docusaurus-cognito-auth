@@ -1,0 +1,9 @@
+{
+  "name": "auth-check",
+  "version": "1.0.0",
+  "description": "Lambda@Edge viewer-request handler — JWT validation",
+  "type": "module",
+  "dependencies": {
+    "jose": "^5.0.0"
+  }
+}
