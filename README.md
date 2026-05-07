@@ -1,6 +1,5 @@
 # docusaurus-cognito-auth
 
-[![CI / Deploy](https://github.com/biscolab/docusaurus-cognito-auth/actions/workflows/deploy.yml/badge.svg)](https://github.com/biscolab/docusaurus-cognito-auth/actions/workflows/deploy.yml)
 [![Node.js](https://img.shields.io/badge/node-22.x-brightgreen)](https://nodejs.org)
 [![AWS SAM](https://img.shields.io/badge/IaC-AWS%20SAM-orange)](https://aws.amazon.com/serverless/sam/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
