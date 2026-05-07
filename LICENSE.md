@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2025 Roberto Belotti
+Copyright (c) 2026 Roberto Belotti
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
